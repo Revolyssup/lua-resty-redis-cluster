@@ -256,10 +256,10 @@ local function try_hosts_slots(self, serv_list)
         else
             table_insert(errors, err)
         end
-        ::continue::
         if #errors == 0 then
             return true, nil
         end
+        ::continue::
     end
     return nil, errors
 end
