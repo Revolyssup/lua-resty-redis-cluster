@@ -48,7 +48,6 @@ local function health_check_timer(premature)
                 health_dict:incr(key, 1)
                 health_dict:expire(key, 5)
             else
-                health_dict:set(key, 0, 5)
                 health_dict:expire(key, 5)
             end
         end
@@ -154,6 +153,7 @@ local function split(s, delimiter)
 end
 
 local function try_hosts_slots(self, serv_list)
+    ngx.log(ngx.WARN, "HOST SLOT CALLED ---- ")
     local start_time = ngx.now()
     local errors = {}
     local config = self.config
@@ -165,10 +165,13 @@ local function try_hosts_slots(self, serv_list)
         local ip = serv_list[i].ip
         local port = serv_list[i].port
         ngx.log(ngx.WARN, "trying to connect to ", ip, ":", port)
-        if not is_node_healthy(ip, port) then
+        local is_healthy = is_node_healthy(ip, port)
+        ngx.log(ngx.WARN, "is_healthy called in try_host_slots: ", is_healthy)
+        if not is_healthy then
             ngx.log(ngx.WARN, "skipping unhealthy node ", ip, ":", port)
             goto continue
         end
+        ngx.log(ngx.WARN, "HEALTHY NODE. WILL TRY TO CONNECT ---- ")
         local redis_client = redis:new()
         local ok, err, max_connection_timeout_err
         --attempt to connect DEFAULT_MAX_CONNECTION_ATTEMPTS times to redis
@@ -186,15 +189,21 @@ local function try_hosts_slots(self, serv_list)
             end
 
             ok, err = redis_client:connect(ip, port, self.config.connect_opts)
-            if ok then break end
+
+            if ok then 
+                ngx.log(ngx.WARN, "CONNECTED JUST FINE ")
+                break 
+            end
             if err then
+                ngx.log(ngx.WARN, "DID NOT CONNECT WILL CALL TRACK NODE FAILURE. ---- ")
                 track_node_failure(ip, port)
                 ngx.log(ngx.ERR,"unable to connect, attempt nr ", k, " : error: ", err)
                 table_insert(errors, err)
             end
         end
-
+        ngx.log(ngx.WARN, "ALL ATTEMPTS OVER")
         if ok then
+            ngx.log(ngx.WARN, "OKAY ---- ")
             local _, autherr = check_auth(self, redis_client)
             if autherr then
                 table_insert(errors, autherr)
@@ -260,11 +269,13 @@ local function try_hosts_slots(self, serv_list)
                 return true, nil
             end
         elseif max_connection_timeout_err then
+            ngx.log(ngx.WARN, "MAXX CONN TIMEOUT ---- ")
             break
         else
             table_insert(errors, err)
         end
         if #errors == 0 then
+            ngx.log(ngx.WARN, "RETURNING ")
             return true, nil
         end
         ::continue::
@@ -412,7 +423,10 @@ end
 local function pick_node(self, serv_list, slot, magic_radom_seed)
     local healthy_servers = {}
     for _, node in ipairs(serv_list) do
-        if is_node_healthy(node.ip, node.port) then
+        local is_healthy = is_node_healthy(node.ip, node.port)
+        ngx.log(ngx.WARN, "is_node_healthy called in pick_node: ", is_healthy)
+        if is_healthy then
+            ngx.log(ngx.WARN, "healthy node: ", node.ip, ":", node.port)
             table_insert(healthy_servers, node)
         end
     end
@@ -420,6 +434,7 @@ local function pick_node(self, serv_list, slot, magic_radom_seed)
     if #healthy_servers == 0 then
         return nil, "No healthy nodes"
     end
+    ngx.log(ngx.WARN, "healthy servers: ", inspect(healthy_servers))
     local host
     local port
     local slave
