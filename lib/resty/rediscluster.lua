@@ -22,7 +22,7 @@ local redis_crc = xmodem.redis_crc
 
 local DEFAULT_SHARED_DICT_NAME = "redis_cluster_slot_locks"
 local DEFAULT_REFRESH_DICT_NAME = "refresh_lock"
-local DEFAULT_MAX_REDIRECTION = 5
+local DEFAULT_MAX_REDIRECTION = 2
 local DEFAULT_MAX_CONNECTION_ATTEMPTS = 2
 local DEFAULT_KEEPALIVE_TIMEOUT = 55000
 local DEFAULT_KEEPALIVE_CONS = 1000
@@ -48,6 +48,7 @@ local function health_check_timer(premature)
                 health_dict:incr(key, 1)
                 health_dict:expire(key, 5)
             else
+                health_dict:set(key, 0, 5)
                 health_dict:expire(key, 5)
             end
         end
@@ -417,8 +418,7 @@ local function pick_node(self, serv_list, slot, magic_radom_seed)
     end
 
     if #healthy_servers == 0 then
-        ngx.log(ngx.WARN, "All nodes for slot ", slot, " are unhealthy, using original list")
-        healthy_servers = serv_list
+        return nil, "No healthy nodes"
     end
     local host
     local port
