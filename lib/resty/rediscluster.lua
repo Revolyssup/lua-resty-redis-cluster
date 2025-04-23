@@ -31,25 +31,19 @@ local DEFAULT_SEND_TIMEOUT = 1000
 local DEFAULT_READ_TIMEOUT = 1000
 local DEFAULT_HEALTH_DICT_NAME = "redis_cluster_health"
 local inspect = require("inspect")
-local function health_check_timer(premature)
-    if premature then return end
+
+local function health_check_timer()
     local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
-    if not health_dict then
-        ngx.log(ngx.WARN, "HEALTH DICT NOT FOUND>RETURNING")
-        return
-    end
     local all_keys = health_dict:get_keys()
     for _, key in ipairs(all_keys) do
-        ngx.log(ngx.WARN, "got key  ", inspect(key))
         local failures = health_dict:get(key)
-        if failures then
-            ngx.log(ngx.WARN, "got failures  ", inspect(failures))
-            if failures <= 3 then
-                health_dict:incr(key, 1)
-                health_dict:expire(key, 5)
-            else
-                health_dict:expire(key, 5)
-            end
+        if failures > 3 then
+            -- Keep unhealthy nodes alive
+            health_dict:incr(key, 1)
+            health_dict:expire(key, 5)
+        else
+            -- Delete healthy nodes
+            health_dict:delete(key)
         end
     end
 end
