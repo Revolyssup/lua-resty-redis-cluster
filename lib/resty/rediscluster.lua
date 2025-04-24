@@ -40,6 +40,7 @@ local function health_check_timer(premature)
 
     local all_keys = health_dict:get_keys()
     ngx.log(ngx.WARN, "Health check for keys: ", inspect(all_keys))
+
     for _, key in ipairs(all_keys) do
         local ip, port = string.match(key, "^(.-):(%d+)$")
         if not ip or not port then
@@ -47,15 +48,31 @@ local function health_check_timer(premature)
             goto continue
         end
         port = tonumber(port)
-        -- Perform health check...
+
+        -- Create a new Redis client for each check
+        local red = redis:new()
+        red:set_timeouts(500, 500, 500)  -- 500ms for connect/send/read
+
+        -- Attempt to connect and send PING
+        local ok, err = red:connect(ip, port)
         if ok then
-            -- Node is healthy: reset failures to 0 but KEEP the entry
-            health_dict:set(key, 0, 60)  -- Reset failures, TTL 60s
+            -- Check if PING succeeds
+            local res, err = red:ping()
+            if res == nil then
+                ok = false
+                err = "PING failed"
+            end
+            ngx.log(ngx.WARN, "Health check for node ", key, ": ", res, " err: ", err)
+            red:close()  -- Close connection after check
+        end
+
+        -- Update health status based on check
+        if ok then
+            health_dict:set(key, 0, 0)  -- Healthy: reset failures, no TTL
             ngx.log(ngx.WARN, "Node ", key, " is healthy (failures=0)")
         else
-            -- Node is unhealthy: increment failures
             local failures = health_dict:get(key) or 0
-            health_dict:set(key, failures + 1, 60)
+            health_dict:set(key, failures + 1, 60)  -- Unhealthy: increment failures with TTL
             ngx.log(ngx.WARN, "Node ", key, " is unhealthy (failures=", failures + 1, ")")
         end
 
