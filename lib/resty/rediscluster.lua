@@ -39,7 +39,7 @@ local function health_check_timer(premature)
     if not health_dict then return end
 
     local all_keys = health_dict:get_keys()
-    ngx.log(ngx.WARN, "TIMER CALLED WITH KEYS ", inspect(all_keys))
+    ngx.log(ngx.WARN, "Health check for keys: ", inspect(all_keys))
     for _, key in ipairs(all_keys) do
         local ip, port = string.match(key, "^(.-):(%d+)$")
         if not ip or not port then
@@ -47,23 +47,11 @@ local function health_check_timer(premature)
             goto continue
         end
         port = tonumber(port)
-
-        local redis_client = redis:new()
-        redis_client:set_timeouts(500, 500, 500)
-        local ok, err = redis_client:connect(ip, port)
+        -- Perform health check...
         if ok then
-            local res, err = redis_client:ping()
-            if res == ngx.null then
-                ok = false
-                err = "PING failed"
-            end
-            redis_client:close()
-        end
-
-        if ok then
-            -- Node is healthy: decrement failure count
-            health_dict:delete(key)
-            ngx.log(ngx.WARN, "Node ", key, " is healthy, failures reset")
+            -- Node is healthy: reset failures to 0 but KEEP the entry
+            health_dict:set(key, 0, 60)  -- Reset failures, TTL 60s
+            ngx.log(ngx.WARN, "Node ", key, " is healthy (failures=0)")
         else
             -- Node is unhealthy: increment failures
             local failures = health_dict:get(key) or 0
@@ -76,6 +64,22 @@ local function health_check_timer(premature)
 end
 
 ngx.timer.every(1, health_check_timer)
+
+local function track_node_failure(ip, port)
+    ngx.log(ngx.WARN, "track node failure for ip:", ip, " port:", port)
+    local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
+    if not health_dict then
+        return
+    end
+    ngx.log(ngx.WARN, "track node failure for ip: 2", ip, " port:", port)
+    local key = ip .. ":" .. port
+    health_dict:incr(key, 1, 0, 60)
+    -- if not newval then
+    --     health_dict:set(key, 1, 0, 60)
+    -- end
+    local all_keys = health_dict:get_keys()
+    ngx.log(ngx.WARN, "Health check for keys after track node fail: ", inspect(all_keys))
+end
 
 local function parse_key(key_str)
     local left_tag_single_index = string_find(key_str, "{", 0)
@@ -96,19 +100,7 @@ local mt = { __index = _M }
 local slot_cache = {}
 local master_nodes = {}
 
-local function track_node_failure(ip, port)
-    ngx.log(ngx.WARN, "track node failure for ip:", ip, " port:", port)
-    local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
-    if not health_dict then
-        return
-    end
 
-    local key = ip .. ":" .. port
-    local newval, err = health_dict:incr(key, 1, 0, 60)
-    if not newval then
-        health_dict:set(key, 1, 60)
-    end
-end
 
 local function is_node_healthy(ip, port)
     local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
@@ -295,6 +287,7 @@ end
 
 
 function _M.fetch_slots(self)
+    ngx.log(ngx.WARN, "CALLED FETCH SLOT")
     local serv_list = self.config.serv_list
     local serv_list_cached = slot_cache[self.config.name .. "serv_list"]
 
@@ -315,7 +308,6 @@ function _M.fetch_slots(self)
     end
 
     serv_list_cached = nil -- important!
-
     local _, errors = try_hosts_slots(self, serv_list_combined)
     if errors then
         local err = "failed to fetch slots: " .. table.concat(errors, ";")
@@ -345,20 +337,19 @@ function _M.refresh_slots(self)
     local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
     local current_nodes = {}
     local servers = slot_cache[self.config.name .. "serv_list"].serv_list
-    ngx.log(ngx.WARN, "WILL ITERATE OVER SERVERS ", inspect(servers))
     for _, node in ipairs(servers) do
         local key = node.ip .. ":" .. node.port
         current_nodes[key] = true
-        -- Initialize node with 0 failures if not present
+        -- Add node to health_dict if missing, with no TTL
         if not health_dict:get(key) then
-            health_dict:set(key, 0, 60)  -- TTL 60 seconds
+            health_dict:set(key, 0, 0)  -- TTL=0 (persistent)
         end
     end
-
     -- Cleanup stale nodes
     local all_keys = health_dict:get_keys()
     for _, key in ipairs(all_keys) do
         if not current_nodes[key] then
+            ngx.log(ngx.WARN, "Cleaning up stale node: ", key)
             health_dict:delete(key)
         end
     end
@@ -372,6 +363,7 @@ end
 
 
 function _M.init_slots(self)
+    ngx.log(ngx.WARN, "CALLED INIT SLOTS")
     if slot_cache[self.config.name] then
         -- already initialized
         return true
@@ -417,6 +409,7 @@ end
 
 
 function _M.new(_, config)
+    ngx.log(ngx.WARN, "NEW CALLED")
     if not config.name then
         return nil, " redis cluster config name is empty"
     end
@@ -511,15 +504,6 @@ local function parse_ask_signal(res)
     return nil, nil
 end
 
-local function parse_moved_signal(err)
-    -- MOVED error format: "MOVED <slot> <host>:<port>"
-    local host, port = string.match(err, "^MOVED %d+ ([%d%.]+):(%d+)$")
-    if not host then
-        -- Fallback pattern for non-IP hostnames
-        host, port = string.match(err, "^MOVED %d+ ([^:]+):(%d+)$")
-    end
-    return host, tonumber(port)
-end
 
 local function has_moved_signal(res)
     if res ~= ngx.null then
