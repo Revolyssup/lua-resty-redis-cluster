@@ -62,14 +62,8 @@ local function health_check_timer(premature)
 
         if ok then
             -- Node is healthy: decrement failure count
-            local current = health_dict:get(key) or 0
-            if current > 0 then
-                health_dict:set(key, current - 1, 60)
-                ngx.log(ngx.WARN, "Node ", key, " is healthy, failures decremented to ", current - 1)
-            else
-                health_dict:delete(key)
-                ngx.log(ngx.WARN, "Node ", key, " is healthy, failures reset")
-            end
+            health_dict:delete(key)
+            ngx.log(ngx.WARN, "Node ", key, " is healthy, failures reset")
         else
             -- Node is unhealthy: increment failures
             local failures = health_dict:get(key) or 0
