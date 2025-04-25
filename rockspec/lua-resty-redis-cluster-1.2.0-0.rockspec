@@ -6,7 +6,6 @@ source = {
     tag = "v1.2.0"
 }
 
-
 description = {
     summary = "Openresty lua client for redis cluster",
     detailed = [[
