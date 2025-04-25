@@ -20,6 +20,8 @@ jobs:
 
       - name: Install Luarocks
         uses: leafo/gh-actions-luarocks@v4
+        with:
+          luarocksVersion: "3.8.0"
 
       - name: Extract release version
         id: release_env
