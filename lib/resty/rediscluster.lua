@@ -48,7 +48,7 @@ local function health_check_timer(premature)
             goto continue
         end
         port = tonumber(port)
-
+        local ok
         -- Create a new Redis client for each check
         local red = redis:new()
         red:set_timeouts(500, 500, 500)  -- 500ms for connect/send/read
@@ -65,7 +65,6 @@ local function health_check_timer(premature)
             ngx.log(ngx.WARN, "Health check for node ", key, ": ", res, " err: ", err)
             red:close()  -- Close connection after check
         end
-
         -- Update health status based on check
         if ok then
             health_dict:set(key, 0, 0)  -- Healthy: reset failures, no TTL
@@ -357,10 +356,6 @@ function _M.refresh_slots(self)
     for _, node in ipairs(servers) do
         local key = node.ip .. ":" .. node.port
         current_nodes[key] = true
-        -- Add node to health_dict if missing, with no TTL
-        if not health_dict:get(key) then
-            health_dict:set(key, 0, 0)  -- TTL=0 (persistent)
-        end
     end
     -- Cleanup stale nodes
     local all_keys = health_dict:get_keys()
@@ -571,6 +566,9 @@ local function handle_command_with_retry(self, target_ip, target_port, asking, c
         else
             ip, port, slave, err = pick_node(self, serv_list, slot)
             if err then
+                if err == err_unhealthy_master then
+                    return nil, err
+                end
                 ngx.log(ngx.ERR, "pickup node failed, will return failed for this request, meanwhile refereshing slotcache " .. err)
                 self:refresh_slots()
                 return nil, err
