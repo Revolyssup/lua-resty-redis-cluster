@@ -3,7 +3,7 @@ version = "1.2.1-0"
 
 source = {
     url = "git://github.com/revolyssup/lua-resty-redis-cluster",
-    tag = "v1.2.1"
+    tag = "v1.2.2"
 }
 
 description = {
