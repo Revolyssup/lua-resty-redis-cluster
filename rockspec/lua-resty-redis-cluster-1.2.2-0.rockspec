@@ -1,5 +1,5 @@
 package = "lua-resty-redis-cluster"
-version = "1.2.1-0"
+version = "1.2.2-0"
 
 source = {
     url = "git://github.com/revolyssup/lua-resty-redis-cluster",
