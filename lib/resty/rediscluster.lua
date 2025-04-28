@@ -72,7 +72,7 @@ local function health_check_timer(premature)
         end
         -- Update health status based on check
         if ok then
-            health_dict:set(key, 0, 0)  -- Healthy: reset failures, no TTL
+            health_dict:delete(key)
             ngx.log(ngx.WARN, "health check success for: ", ip, ":", port)
         else
             local failures = health_dict:get(key) or 0
