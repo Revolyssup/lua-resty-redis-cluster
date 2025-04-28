@@ -85,8 +85,6 @@ local function health_check_timer(premature)
     end
 end
 
-ngx.timer.every(1, health_check_timer)
-
 local function track_node_failure(ip, port, name)
     local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
     if not health_dict then
@@ -921,5 +919,9 @@ setmetatable(_M, {
         return method
     end
 })
+
+function _M.init()
+    ngx.timer.every(1, health_check_timer)
+end
 
 return _M
