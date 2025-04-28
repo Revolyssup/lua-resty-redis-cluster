@@ -30,7 +30,7 @@ local DEFAULT_SEND_TIMEOUT = 1000
 local DEFAULT_READ_TIMEOUT = 1000
 local DEFAULT_HEALTH_DICT_NAME = "redis_cluster_health"
 local err_unhealthy_master = "master node is unhealthy"
-local inspect = require "inspect"
+
 local function generate_key(name, ip, port)
     return name .. ":" .. ip .. ":" .. port
 end
@@ -47,7 +47,6 @@ local function health_check_timer(premature)
     end
 
     local all_keys = health_dict:get_keys()
-    ngx.log(ngx.WARN, "health check keys: ", inspect(all_keys))
     for _, key in ipairs(all_keys) do
         local ip, port = string.match(key, "^[^:]+:([^:]+):(%d+)$")
         if not ip or not port then
