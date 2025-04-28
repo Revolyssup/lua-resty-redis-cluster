@@ -21,13 +21,77 @@ local redis_crc = xmodem.redis_crc
 
 local DEFAULT_SHARED_DICT_NAME = "redis_cluster_slot_locks"
 local DEFAULT_REFRESH_DICT_NAME = "refresh_lock"
-local DEFAULT_MAX_REDIRECTION = 5
-local DEFAULT_MAX_CONNECTION_ATTEMPTS = 3
+local DEFAULT_MAX_REDIRECTION = 2
+local DEFAULT_MAX_CONNECTION_ATTEMPTS = 2
 local DEFAULT_KEEPALIVE_TIMEOUT = 55000
 local DEFAULT_KEEPALIVE_CONS = 1000
 local DEFAULT_CONNECTION_TIMEOUT = 1000
 local DEFAULT_SEND_TIMEOUT = 1000
 local DEFAULT_READ_TIMEOUT = 1000
+local DEFAULT_HEALTH_DICT_NAME = "redis_cluster_health"
+local err_unhealthy_master = "master node is unhealthy"
+
+local function generate_key(name, ip, port)
+    return name .. ":" .. ip .. ":" .. port
+end
+
+
+local function health_check_timer(premature)
+    if premature then
+        return
+    end
+
+    local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
+    if not health_dict then
+        return
+    end
+
+    local all_keys = health_dict:get_keys()
+    for _, key in ipairs(all_keys) do
+        local ip, port = string.match(key, "^[^:]+:([^:]+):(%d+)$")
+        if not ip or not port then
+            health_dict:delete(key)
+            goto continue
+        end
+        port = tonumber(port)
+        local ok
+        -- Create a new Redis client for each check
+        local red = redis:new()
+        red:set_timeouts(500, 500, 500)  -- 500ms for connect/send/read
+        ngx.log(ngx.WARN, "health check for: ", ip, ":", port)
+        -- Attempt to connect and send PING
+        local ok, err = red:connect(ip, port)
+        if ok then
+            -- Check if PING succeeds
+            local res, err = red:ping()
+            if res == nil then
+                ok = false
+                err = "PING failed"
+            end
+            red:close()  -- Close connection after check
+        end
+        -- Update health status based on check
+        if ok then
+            health_dict:set(key, 0, 0)  -- Healthy: reset failures, no TTL
+            ngx.log(ngx.WARN, "health check success for: ", ip, ":", port)
+        else
+            local failures = health_dict:get(key) or 0
+            health_dict:set(key, failures + 1, 60)  -- Unhealthy: increment failures with TTL
+            ngx.log(ngx.WARN, "health check failed for: ", ip, ":", port, "failures: ", failures + 1)
+        end
+
+        ::continue::
+    end
+end
+
+local function track_node_failure(ip, port, name)
+    local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
+    if not health_dict then
+        return
+    end
+    local key = generate_key(name, ip, port)
+    health_dict:incr(key, 1, 0, 60)
+end
 
 local function parse_key(key_str)
     local left_tag_single_index = string_find(key_str, "{", 0)
@@ -47,6 +111,20 @@ local mt = { __index = _M }
 
 local slot_cache = {}
 local master_nodes = {}
+
+
+
+local function is_node_healthy(ip, port, name)
+    local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
+    if not health_dict then
+        return true
+    end
+
+    local key = generate_key(name, ip, port)
+    local is_healthy = (health_dict:get(key) or 0) <= 3
+    return is_healthy
+end
+
 
 local cmds_for_all_master = {
     ["flushall"] = true,
@@ -104,18 +182,21 @@ local function try_hosts_slots(self, serv_list)
     if #serv_list < 1 then
         return nil, "failed to fetch slots, serv_list config is empty"
     end
-
     for i = 1, #serv_list do
         local ip = serv_list[i].ip
         local port = serv_list[i].port
+        local is_healthy = is_node_healthy(ip, port, self.config.name)
+        if not is_healthy then
+            goto continue
+        end
         local redis_client = redis:new()
         local ok, err, max_connection_timeout_err
-        redis_client:set_timeouts(config.connect_timeout or DEFAULT_CONNECTION_TIMEOUT,
-                                  config.send_timeout or DEFAULT_SEND_TIMEOUT,
-                                  config.read_timeout or DEFAULT_READ_TIMEOUT)
-
         --attempt to connect DEFAULT_MAX_CONNECTION_ATTEMPTS times to redis
         for k = 1, config.max_connection_attempts or DEFAULT_MAX_CONNECTION_ATTEMPTS do
+            local attempt_timeout = k == 1 and 100 or 800  -- 100ms first attempt, 800ms retry
+            redis_client:set_timeouts(attempt_timeout,
+            config.send_timeout or DEFAULT_SEND_TIMEOUT,
+            config.read_timeout or DEFAULT_READ_TIMEOUT)
             local total_connection_time_ms = (ngx.now() - start_time) * 1000
             if (config.max_connection_timeout and total_connection_time_ms > config.max_connection_timeout) then
                 max_connection_timeout_err = "max_connection_timeout of " .. config.max_connection_timeout .. "ms reached."
@@ -125,13 +206,16 @@ local function try_hosts_slots(self, serv_list)
             end
 
             ok, err = redis_client:connect(ip, port, self.config.connect_opts)
-            if ok then break end
+
+            if ok then
+                break
+            end
             if err then
                 ngx.log(ngx.ERR,"unable to connect, attempt nr ", k, " : error: ", err)
+                track_node_failure(ip, port, self.config.name)
                 table_insert(errors, err)
             end
         end
-
         if ok then
             local _, autherr = check_auth(self, redis_client)
             if autherr then
@@ -205,6 +289,7 @@ local function try_hosts_slots(self, serv_list)
         if #errors == 0 then
             return true, nil
         end
+        ::continue::
     end
     return nil, errors
 end
@@ -231,7 +316,6 @@ function _M.fetch_slots(self)
     end
 
     serv_list_cached = nil -- important!
-
     local _, errors = try_hosts_slots(self, serv_list_combined)
     if errors then
         local err = "failed to fetch slots: " .. table.concat(errors, ";")
@@ -257,6 +341,22 @@ function _M.refresh_slots(self)
     end
 
     self:fetch_slots()
+    -- Cleanup health dict entries for removed nodes
+    local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
+    local current_nodes = {}
+    local servers = slot_cache[self.config.name .. "serv_list"].serv_list
+    for _, node in ipairs(servers) do
+        local key = generate_key(self.config.name, node.ip, node.port)
+        current_nodes[key] = true
+    end
+    -- Cleanup stale nodes
+    local all_keys = health_dict:get_keys()
+    for _, key in ipairs(all_keys) do
+        if not current_nodes[key] then
+            health_dict:delete(key)
+        end
+    end
+
     ok, err = lock:unlock()
     if not ok then
         ngx.log(ngx.ERR, "failed to unlock in refresh slot cache:", err)
@@ -330,33 +430,47 @@ end
 
 
 local function pick_node(self, serv_list, slot, magic_radom_seed)
+    local healthy_servers = {}
+    for i, node in ipairs(serv_list) do
+        -- first node here is master. If its unhealthy then we should return err
+        local is_healthy = is_node_healthy(node.ip, node.port, self.config.name)
+        if i == 1 and not is_healthy then
+            return nil, nil, nil, err_unhealthy_master
+        end
+        if is_healthy then
+            table_insert(healthy_servers, node)
+        end
+    end
+    if #healthy_servers == 0 then
+        return nil, nil, nil, "No healthy nodes"
+    end
     local host
     local port
     local slave
     local index
-    if #serv_list < 1 then
+    if #healthy_servers < 1 then
         return nil, nil, nil, "serv_list for slot " .. slot .. " is empty"
     end
     if self.config.enable_slave_read then
         if magic_radom_seed then
-            index = magic_radom_seed % #serv_list + 1
+            index = magic_radom_seed % #healthy_servers + 1
         else
-            index = math.random(#serv_list)
+            index = math.random(#healthy_servers)
         end
-        host = serv_list[index].ip
-        port = serv_list[index].port
+        host = healthy_servers[index].ip
+        port = healthy_servers[index].port
         --cluster slots will always put the master node as first
         if index > 1 then
             slave = true
         else
             slave = false
         end
-        --ngx.log(ngx.NOTICE, "pickup node: ", c(serv_list[index]))
+        --ngx.log(ngx.NOTICE, "pickup node: ", c(healthy_servers[index]))
     else
-        host = serv_list[1].ip
-        port = serv_list[1].port
+        host = healthy_servers[1].ip
+        port = healthy_servers[1].port
         slave = false
-        --ngx.log(ngx.NOTICE, "pickup node: ", cjson.encode(serv_list[1]))
+        --ngx.log(ngx.NOTICE, "pickup node: ", cjson.encode(healthy_servers[1]))
     end
     return host, port, slave
 end
@@ -414,11 +528,10 @@ local function handle_command_with_retry(self, target_ip, target_port, asking, c
 
     key = tostring(key)
     local slot = redis_slot(key)
-
     for k = 1, config.max_redirection or DEFAULT_MAX_REDIRECTION do
-
+        local attempt_timeout = k == 1 and 100 or 800  -- 100ms first attempt, 800ms retry
         if k > 1 then
-            ngx.log(ngx.NOTICE, "handle retry attempts:" .. k .. " for cmd:" .. cmd .. " key:" .. key)
+            ngx.log(ngx.WARN, "handle retry attempts:" .. k .. " for cmd:" .. cmd .. " key:" .. key)
         end
 
         local slots = slot_cache[self.config.name]
@@ -439,18 +552,22 @@ local function handle_command_with_retry(self, target_ip, target_port, asking, c
         else
             ip, port, slave, err = pick_node(self, serv_list, slot)
             if err then
+                if err == err_unhealthy_master then
+                    return nil, err
+                end
                 ngx.log(ngx.ERR, "pickup node failed, will return failed for this request, meanwhile refereshing slotcache " .. err)
                 self:refresh_slots()
                 return nil, err
             end
         end
-
         local redis_client = redis:new()
-        redis_client:set_timeouts(config.connect_timeout or DEFAULT_CONNECTION_TIMEOUT,
+        redis_client:set_timeouts(attempt_timeout,
                                   config.send_timeout or DEFAULT_SEND_TIMEOUT,
                                   config.read_timeout or DEFAULT_READ_TIMEOUT)
         local ok, connerr = redis_client:connect(ip, port, self.config.connect_opts)
-
+        if not ok then
+            track_node_failure(ip, port, self.config.name)
+        end
         if ok then
             local authok, autherr = check_auth(self, redis_client)
             if autherr then
@@ -481,7 +598,6 @@ local function handle_command_with_retry(self, target_ip, target_port, asking, c
             else
                 res, err = redis_client[cmd](redis_client, key, ...)
             end
-
             if err then
                 if string.sub(err, 1, 5) == "MOVED" then
                     --ngx.log(ngx.NOTICE, "find MOVED signal, trigger retry for normal commands, cmd:" .. cmd .. " key:" .. key)
@@ -512,6 +628,7 @@ local function handle_command_with_retry(self, target_ip, target_port, asking, c
                     return nil, "Cannot executing command, cluster status is failed!"
                 else
                     --There might be node fail, we should also refresh slot cache
+                    track_node_failure(ip, port, self.config.name)
                     self:refresh_slots()
                     return nil, err
                 end
@@ -801,5 +918,9 @@ setmetatable(_M, {
         return method
     end
 })
+
+function _M.init()
+    ngx.timer.every(1, health_check_timer)
+end
 
 return _M
