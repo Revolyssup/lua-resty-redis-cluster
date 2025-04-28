@@ -37,10 +37,14 @@ end
 
 
 local function health_check_timer(premature)
-    if premature then return end
+    if premature then
+        return
+    end
 
     local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
-    if not health_dict then return end
+    if not health_dict then
+        return
+    end
 
     local all_keys = health_dict:get_keys()
     ngx.log(ngx.WARN, "health check keys: ", inspect(all_keys))
@@ -206,10 +210,11 @@ local function try_hosts_slots(self, serv_list)
 
             ok, err = redis_client:connect(ip, port, self.config.connect_opts)
 
-            if ok then 
-                break 
+            if ok then
+                break
             end
             if err then
+                ngx.log(ngx.ERR,"unable to connect, attempt nr ", k, " : error: ", err)
                 track_node_failure(ip, port, self.config.name)
                 table_insert(errors, err)
             end
