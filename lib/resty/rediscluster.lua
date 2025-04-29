@@ -77,7 +77,7 @@ local function health_check_timer(premature)
         else
             local failures = health_dict:get(key) or 0
             health_dict:set(key, failures + 1, 60)  -- Unhealthy: increment failures with TTL
-            ngx.log(ngx.WARN, "health check failed for: ", ip, ":", port, "failures: ", failures + 1)
+            ngx.log(ngx.WARN, "health check failed for: ", ip, ":", port, " - failures: ", failures + 1)
         end
 
         ::continue::
