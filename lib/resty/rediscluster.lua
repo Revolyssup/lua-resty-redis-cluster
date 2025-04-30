@@ -45,7 +45,7 @@ local function health_check_timer(premature)
     if not health_dict then
         return
     end
-    health_check_running = true
+
     local all_keys = health_dict:get_keys()
     for _, key in ipairs(all_keys) do
         local ip, port = string.match(key, "^[^:]+:([^:]+):(%d+)$")
