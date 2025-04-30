@@ -30,7 +30,7 @@ local DEFAULT_SEND_TIMEOUT = 1000
 local DEFAULT_READ_TIMEOUT = 1000
 local DEFAULT_HEALTH_DICT_NAME = "redis_cluster_health"
 local err_unhealthy_master = "master node is unhealthy"
-
+local health_check_running = false
 local function generate_key(name, ip, port)
     return name .. ":" .. ip .. ":" .. port
 end
@@ -45,7 +45,7 @@ local function health_check_timer(premature)
     if not health_dict then
         return
     end
-
+    health_check_running = true
     local all_keys = health_dict:get_keys()
     for _, key in ipairs(all_keys) do
         local ip, port = string.match(key, "^[^:]+:([^:]+):(%d+)$")
@@ -77,12 +77,13 @@ local function health_check_timer(premature)
         else
             local failures = health_dict:get(key) or 0
             health_dict:set(key, failures + 1, 60)  -- Unhealthy: increment failures with TTL
-            ngx.log(ngx.WARN, "health check failed for: ", ip, ":", port, " - failures: ", failures + 1)
+            ngx.log(ngx.ERR, "health check failed for: ", ip, ":", port, " - failures: ", failures + 1)
         end
 
         ::continue::
     end
 end
+
 
 local function track_node_failure(ip, port, name)
     local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
@@ -113,6 +114,14 @@ local slot_cache = {}
 local master_nodes = {}
 
 
+function _M.health_check_timer(premature)
+    if health_check_running then
+        return
+    end
+    health_check_running = true
+    pcall(health_check_timer, premature)
+    health_check_running = false
+end
 
 local function is_node_healthy(ip, port, name)
     local health_dict = ngx.shared[DEFAULT_HEALTH_DICT_NAME]
@@ -920,7 +929,7 @@ setmetatable(_M, {
 })
 
 function _M.init()
-    ngx.timer.every(1, health_check_timer)
+    ngx.timer.every(1, _M.health_check_timer)
 end
 
 return _M
